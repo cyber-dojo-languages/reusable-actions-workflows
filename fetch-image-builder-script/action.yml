@@ -1,0 +1,31 @@
+name: Fetch image_builder script
+description: Downloads image_build_test_push_notify.sh at the given ref and outputs its path
+
+inputs:
+  ref:
+    description: "The cyber-dojo-tools/image_builder ref to take the script from"
+    required: false
+    default: master
+
+outputs:
+  path:
+    description: "Path of the downloaded executable script"
+    value: ${{ steps.fetch.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    # Downloaded under RUNNER_TEMP rather than into the workspace, because the
+    # script copies and commits its repo when git reports it dirty, and a
+    # downloaded file sitting in the checkout would make it dirty.
+    - name: Download image_build_test_push_notify.sh
+      id: fetch
+      shell: bash
+      run: |
+        name=image_build_test_push_notify.sh
+        path="${RUNNER_TEMP}/${name}"
+        curl --fail --silent --show-error \
+          --output "${path}" \
+          "https://raw.githubusercontent.com/cyber-dojo-tools/image_builder/${{ inputs.ref }}/${name}"
+        chmod +x "${path}"
+        echo "path=${path}" >> "${GITHUB_OUTPUT}"

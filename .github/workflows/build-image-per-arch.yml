@@ -1,0 +1,104 @@
+name: Build image per arch
+
+# Called by every cyber-dojo-languages repo's main.yml.
+# Each architecture is built on a machine of that architecture, so nothing is
+# emulated, and create-index then names both pushed digests in one multi-arch
+# index tagged with the commit sha.
+
+on:
+  workflow_call:
+    inputs:
+      image_builder_ref:
+        description: "The cyber-dojo-tools/image_builder ref to take the build script from"
+        required: false
+        type: string
+        default: master
+
+jobs:
+
+  build-amd64:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: cyber-dojo-languages/pinned-checkout@main
+
+      # Referenced by owner/repo/path, not by ./path. Inside a reusable
+      # workflow ./path resolves against the calling repo's checkout, which is
+      # a language repo and does not hold this action.
+      - id: script
+        uses: cyber-dojo-languages/reusable-actions-workflows/fetch-image-builder-script@main
+        with:
+          ref: ${{ inputs.image_builder_ref }}
+
+      - name: Build, version-check and push the amd64 image by digest
+        id: build
+        env:
+          SCRIPT: ${{ steps.script.outputs.path }}
+          PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGES_USERNAME: ${{ github.actor }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          TYPE: ${{ github.event_name }}
+        run: |
+          "${SCRIPT}" "${GITHUB_WORKSPACE}" --stage=arch
+
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: cyber-dojo-languages/pinned-checkout@main
+
+      - id: script
+        uses: cyber-dojo-languages/reusable-actions-workflows/fetch-image-builder-script@main
+        with:
+          ref: ${{ inputs.image_builder_ref }}
+
+      - name: Build, version-check and push the arm64 image by digest
+        id: build
+        env:
+          SCRIPT: ${{ steps.script.outputs.path }}
+          PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGES_USERNAME: ${{ github.actor }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          TYPE: ${{ github.event_name }}
+        run: |
+          "${SCRIPT}" "${GITHUB_WORKSPACE}" --stage=arch
+
+  # Runs only if both architectures built, version-checked and pushed, so a
+  # failure on either one publishes no tag at all.
+  create-index:
+    runs-on: ubuntu-latest
+    needs: [build-amd64, build-arm64]
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: cyber-dojo-languages/pinned-checkout@main
+
+      - id: script
+        uses: cyber-dojo-languages/reusable-actions-workflows/fetch-image-builder-script@main
+        with:
+          ref: ${{ inputs.image_builder_ref }}
+
+      - name: Create the multi-arch index and tag it with the commit sha
+        env:
+          SCRIPT: ${{ steps.script.outputs.path }}
+          PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGES_USERNAME: ${{ github.actor }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          TYPE: ${{ github.event_name }}
+          AMD64_DIGEST: ${{ needs.build-amd64.outputs.digest }}
+          ARM64_DIGEST: ${{ needs.build-arm64.outputs.digest }}
+        run: |
+          "${SCRIPT}" \
+            "${GITHUB_WORKSPACE}" \
+            --stage=index \
+            --digest="${AMD64_DIGEST}" \
+            --digest="${ARM64_DIGEST}"
