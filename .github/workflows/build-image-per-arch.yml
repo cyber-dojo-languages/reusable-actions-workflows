@@ -42,7 +42,15 @@ jobs:
     steps:
       - uses: cyber-dojo-languages/pinned-checkout@main
 
+      # The action commits only once the last commit is older than this, and
+      # its own default is 50. That suited a keep-alive on a daily schedule,
+      # which would reach day 51 and commit. This job runs weekly, so the
+      # runs land on days 7, 14 and so on: against a default of 50 the first
+      # qualifying run is day 56, leaving four days before GitHub's cutoff at
+      # 60. Thirty brings that forward to day 35.
       - uses: entepotenz/keep-github-actions-alive-min-dependencies@v1
+        with:
+          TIME_ELAPSED_THRESHOLD_IN_DAYS: 30
 
   build-amd64:
     runs-on: ubuntu-latest
