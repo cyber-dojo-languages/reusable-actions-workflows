@@ -9,6 +9,12 @@ name: Build image per arch
 # publishes holds the amd64 manifest alone, so an arm64 host is told there is
 # no matching manifest rather than being given an image whose katas cannot
 # link.
+#
+# The first job keeps the caller's scheduled workflows switched on. GitHub
+# disables them after 60 days with no commit in the repo, and a scheduled run
+# is not a commit, so something has to commit. It has no needs, so a repo
+# whose build is failing still keeps its schedule: that is the repo nobody
+# looks at for two months, and the one that most needs this to work.
 
 on:
   workflow_call:
@@ -17,7 +23,7 @@ on:
         description: "The cyber-dojo-tools/image_builder ref to take the build script from"
         required: false
         type: string
-        default: master
+        default: main
       arm64:
         description: "Build an arm64 image. False where the language is x86-64 only."
         required: false
@@ -25,6 +31,18 @@ on:
         default: true
 
 jobs:
+
+  # Deliberately has no needs, so it does not wait for the build and does not
+  # care whether the build passes. A commit the GITHUB_TOKEN makes triggers no
+  # workflow, so this cannot set off another run of the caller.
+  keep-schedule-alive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: cyber-dojo-languages/pinned-checkout@main
+
+      - uses: entepotenz/keep-github-actions-alive-min-dependencies@v1
 
   build-amd64:
     runs-on: ubuntu-latest
