@@ -70,7 +70,7 @@ jobs:
         with:
           ref: ${{ inputs.image_builder_ref }}
 
-      - name: Build, version-check and push the amd64 image by digest
+      - name: Build and push the amd64 image by digest
         id: build
         env:
           SCRIPT: ${{ steps.script.outputs.path }}
@@ -97,7 +97,7 @@ jobs:
         with:
           ref: ${{ inputs.image_builder_ref }}
 
-      - name: Build, version-check and push the arm64 image by digest
+      - name: Build and push the arm64 image by digest
         id: build
         env:
           SCRIPT: ${{ steps.script.outputs.path }}
@@ -108,8 +108,7 @@ jobs:
         run: |
           "${SCRIPT}" "${GITHUB_WORKSPACE}" --stage=arch
 
-  # Runs only if every architecture asked for built, version-checked and
-  # pushed, so a failure on any one publishes no tag at all. The condition is
+  # Runs only if every architecture asked for built and pushed, so a failure on any one publishes no tag at all. The condition is
   # spelled out because build-arm64 is skipped for an x86-64 only language,
   # and a skipped dependency would otherwise skip this job too.
   create-index:
@@ -145,3 +144,166 @@ jobs:
             DIGESTS+=(--digest="${ARM64_DIGEST}")
           fi
           "${SCRIPT}" "${GITHUB_WORKSPACE}" --stage=index "${DIGESTS[@]}"
+
+  # Compares the versions the new image records with those of :latest, the
+  # last image published for this repo, then moves :latest to the new image.
+  # Serialised per repo: a second run waits rather than interleaving its
+  # compare and move with this one. A cancelled pending run costs nothing,
+  # because the run that replaced it moves :latest to a newer image anyway.
+  set-latest:
+    runs-on: ubuntu-latest
+    needs: [create-index]
+    concurrency:
+      group: set-latest-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      packages: write
+      contents: read
+    outputs:
+      versions_changed: ${{ steps.latest.outputs.versions_changed }}
+      language_xy_changed: ${{ steps.latest.outputs.language_xy_changed }}
+      old_language: ${{ steps.latest.outputs.old_language }}
+      new_language: ${{ steps.latest.outputs.new_language }}
+      image: ${{ steps.latest.outputs.image }}
+      tag: ${{ steps.latest.outputs.tag }}
+      digest: ${{ steps.latest.outputs.digest }}
+    steps:
+      - uses: cyber-dojo-languages/pinned-checkout@main
+
+      - id: script
+        uses: cyber-dojo-languages/reusable-actions-workflows/fetch-image-builder-script@main
+        with:
+          ref: ${{ inputs.image_builder_ref }}
+
+      - name: Compare versions with :latest, then move :latest
+        id: latest
+        env:
+          SCRIPT: ${{ steps.script.outputs.path }}
+          PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGES_USERNAME: ${{ github.actor }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          TYPE: ${{ github.event_name }}
+        run: |
+          "${SCRIPT}" "${GITHUB_WORKSPACE}" --stage=latest
+
+  # Carries a version change downstream: re-points every cyber-dojo-languages
+  # repo built FROM this image, brings the partner start-point repo up to it,
+  # and opens an issue here when the language's major.minor moved, so the
+  # change reaches someone by email. Runs only when the caller passes its
+  # secrets (secrets: inherit) and the propagation App's secrets exist; until
+  # then each step below is skipped and the build behaves as before.
+  propagate:
+    runs-on: ubuntu-latest
+    needs: [set-latest]
+    if: needs.set-latest.outputs.versions_changed == 'true'
+    permissions:
+      contents: read
+    steps:
+      - name: Check the propagation App is configured
+        id: app
+        env:
+          APP_ID: ${{ secrets.PROPAGATE_APP_ID }}
+        run: |
+          if [ -n "${APP_ID}" ]; then
+            echo "configured=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Propagation App not configured; nothing propagated." >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Token for cyber-dojo-languages
+        if: steps.app.outputs.configured == 'true'
+        id: cdl-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.PROPAGATE_APP_ID }}
+          private-key: ${{ secrets.PROPAGATE_APP_PRIVATE_KEY }}
+          owner: cyber-dojo-languages
+
+      - name: Token for cyber-dojo-start-points
+        if: steps.app.outputs.configured == 'true'
+        id: cdsp-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.PROPAGATE_APP_ID }}
+          private-key: ${{ secrets.PROPAGATE_APP_PRIVATE_KEY }}
+          owner: cyber-dojo-start-points
+
+      - name: Open an issue when the language's major.minor moved
+        if: >-
+          steps.app.outputs.configured == 'true' &&
+          needs.set-latest.outputs.language_xy_changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.cdl-token.outputs.token }}
+          OLD: ${{ needs.set-latest.outputs.old_language }}
+          NEW: ${{ needs.set-latest.outputs.new_language }}
+        run: |
+          gh issue create --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REPOSITORY#*/}: language moved from '${OLD}' to '${NEW}'" \
+            --body "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+      - id: dependants-script
+        if: steps.app.outputs.configured == 'true'
+        uses: cyber-dojo-languages/reusable-actions-workflows/fetch-image-builder-script@main
+        with:
+          ref: ${{ inputs.image_builder_ref }}
+          script: propagate_to_dependants.sh
+
+      - id: start-point-script
+        if: steps.app.outputs.configured == 'true'
+        uses: cyber-dojo-languages/reusable-actions-workflows/fetch-image-builder-script@main
+        with:
+          ref: ${{ inputs.image_builder_ref }}
+          script: propagate_to_start_point.sh
+
+      - name: Re-point dependent cyber-dojo-languages repos
+        if: steps.app.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ steps.cdl-token.outputs.token }}
+          SCRIPT: ${{ steps.dependants-script.outputs.path }}
+        run: |
+          "${SCRIPT}" \
+            --image="${{ needs.set-latest.outputs.image }}" \
+            --tag="${{ needs.set-latest.outputs.tag }}" \
+            --digest="${{ needs.set-latest.outputs.digest }}" \
+            --upstream="${GITHUB_REPOSITORY#*/}"
+
+      - name: Bring the partner start-point repo up to this image
+        if: steps.app.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ steps.cdsp-token.outputs.token }}
+          SCRIPT: ${{ steps.start-point-script.outputs.path }}
+        run: |
+          "${SCRIPT}" \
+            --repo="${GITHUB_REPOSITORY#*/}" \
+            --image="${{ needs.set-latest.outputs.image }}" \
+            --tag="${{ needs.set-latest.outputs.tag }}" \
+            --digest="${{ needs.set-latest.outputs.digest }}"
+
+  # A run started by the propagation App's commit has no person to email when
+  # it fails (GitHub mails the run's actor), so it opens an issue here instead.
+  report-bot-failure:
+    runs-on: ubuntu-latest
+    needs: [build-amd64, build-arm64, create-index, set-latest, propagate]
+    if: >-
+      always() &&
+      contains(needs.*.result, 'failure') &&
+      endsWith(github.actor, '[bot]') &&
+      github.actor != 'github-actions[bot]'
+    permissions:
+      contents: read
+    steps:
+      - name: Token for cyber-dojo-languages
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.PROPAGATE_APP_ID }}
+          private-key: ${{ secrets.PROPAGATE_APP_PRIVATE_KEY }}
+          owner: cyber-dojo-languages
+
+      - name: Open an issue for the failed run
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          gh issue create --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REPOSITORY#*/}: propagated build failed" \
+            --body "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
