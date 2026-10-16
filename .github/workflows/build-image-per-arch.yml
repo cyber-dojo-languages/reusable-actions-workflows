@@ -29,6 +29,15 @@ on:
         required: false
         type: boolean
         default: true
+    # Optional: a caller that does not pass them builds and moves :latest as
+    # usual, and the propagate job skips every step.
+    secrets:
+      PROPAGATE_APP_ID:
+        description: "ID of the GitHub App that commits version changes downstream"
+        required: false
+      PROPAGATE_APP_PRIVATE_KEY:
+        description: "Private key of that GitHub App"
+        required: false
 
 jobs:
 
